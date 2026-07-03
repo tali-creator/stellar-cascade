@@ -1,6 +1,6 @@
 # Rust
 /backend/target
-/contracts/*/target
+/contracts/target
 **/*.wasm
 .soroban/
 

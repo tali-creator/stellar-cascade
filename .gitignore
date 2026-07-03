@@ -1,0 +1,14 @@
+# Rust
+/backend/target
+/contracts/*/target
+**/*.wasm
+.soroban/
+
+# Node
+/frontend/node_modules
+/frontend/.next
+/frontend/out
+
+# Env
+.env
+.env.local

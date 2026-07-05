@@ -12,4 +12,5 @@
 # Env
 .env
 .env.local
-stellar-cascade-ARCHITECTURE.md
+stellar-cascade-ARCHITECTURE.mdnode_modules/
+node_modules/

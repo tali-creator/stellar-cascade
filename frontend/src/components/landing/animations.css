@@ -1,0 +1,27 @@
+/* Keyframes for the two animated pieces on the landing page.
+   Tailwind's utility classes can't define @keyframes inline, so these
+   live here and get imported directly into the two components that use them. */
+
+@keyframes marquee-scroll {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+.marquee-track {
+  animation: marquee-scroll 24s linear infinite;
+}
+
+@keyframes flow-dash {
+  to {
+    stroke-dashoffset: -56;
+  }
+}
+
+.flow-dash {
+  stroke-dasharray: 6 8;
+  animation: flow-dash 1.6s linear infinite;
+}

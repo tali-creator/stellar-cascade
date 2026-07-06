@@ -8,7 +8,7 @@ Every protocol, wallet, and app here is built on a stack of open-source librarie
 
 ## What Cascade does
 
-Cascade is a funding-splitting protocol built natively on Soroban. A project registers its dependency tree on-chain — declaring what it is built on and how funding should be split across that tree. From then on, whenever money flows in (protocol revenue, a grant, a donation) it cascades automatically down the tree in real time, denominated in USDC or EURC.
+Cascade is a funding-splitting protocol built natively on Soroban. A project registers its dependency tree on-chain — declaring what it is built on and how funding should be split across that tree. From then on, whenever money flows in (protocol revenue, a grant, a donation) it cascades automatically down the tree in real time, denominated in USDC, XLM or EURC.
 
 Core features:
 - **On-chain dependency graphs** — projects declare dependencies and split percentages transparently, and can update them as their stack evolves
@@ -17,11 +17,12 @@ Core features:
 - **Any funding source** — works whether the incoming money is protocol trading fees, a foundation grant, or a one-time community donation
 - **Public, verifiable flows** — anyone can see exactly how funds are moving through the dependency graph, so there is no ambiguity about who is getting paid for what
 
-## Why this model works
+## How it works, briefly
 
-Automated, streaming dependency funding has already proven itself as a durable approach: platforms built on this idea have moved tens of millions of dollars to open-source maintainers over the years, and newer epoch-based streaming variants have distributed thousands of units of value to 80+ projects on a predictable recurring cycle, without depleting the underlying treasury, because funding comes from continuous flow rather than one-time drawdown.
-
-Low, predictable transaction costs are a genuine structural advantage for this model — funding can stream in amounts and frequencies that would be economically pointless on a higher-fee network. That makes Cascade a real differentiator, not just a port of an existing idea: a funding mechanism that is only viable because of what this network is good at.
+1. A project registers on-chain and declares its dependency tree — who it depends on, and what percentage of incoming funds each dependency should get
+2. Funds arrive (protocol revenue, a grant, a donation) into the project's Cascade balance
+3. Those funds stream automatically to dependencies according to the declared splits — and if a dependency has its own dependencies, funding cascades further down the tree
+4. Anyone in the tree can claim their accrued balance at any time
 
 ## What this unlocks
 
@@ -30,18 +31,94 @@ Low, predictable transaction costs are a genuine structural advantage for this m
 - A transparent, on-chain alternative to manual grant allocation that scales without needing a review committee to grow in proportion
 - A flywheel: as more projects launch and route funding through Cascade, the dependencies they share get stronger, making the next project easier to build
 
-## Status
+## Repo structure — three layers
 
-🚧 Early development. See open issues for current priorities across `/frontend`, `/backend`, and `/contracts`.
+This repo is organized as three independently-buildable layers, each with its own responsibilities:
+cascade/
+├── frontend/     Next.js + TypeScript — the web app
+├── backend/      Rust (Axum) — off-chain indexing and API
+└── contracts/    Rust (Soroban) — on-chain logic and source of truth
 
-## Repo structure
 
+
+### `contracts/` — Soroban smart contracts (Rust)
+
+The source of truth. All financial logic — registering projects, storing split configurations, streaming/accruing funds, and letting recipients claim — lives here and is enforced on-chain. Nothing in the backend or frontend can move funds; they can only read state and submit transactions a user has signed.
+
+### `backend/` — Rust service (Axum)
+
+Sits between the contracts and the frontend. Responsibilities:
+- **Indexing** on-chain events (new projects, split updates, deposits, claims) into a database so the frontend doesn't need to query the chain directly for every page load
+- **Serving an API** the frontend consumes for project data, graph traversal, and funding history
+- **Handling wallet-based authentication** — a user signs a challenge message to prove address ownership; there's no password database
+
+### `frontend/` — Next.js + TypeScript app
+
+The web interface: a landing page, a project dashboard (splits, incoming funds, claim button), a dependency graph explorer, and public project pages viewable without connecting a wallet.
+
+
+
+## Running locally
+
+### Prerequisites
+
+```bash
+# Rust + Soroban tooling
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+rustup target add wasm32v1-none
+cargo install --locked stellar-cli --features opt
+
+# Node.js 18+ and npm (or pnpm)
+node -v
+npm -v
 ```
-frontend/    Next.js/TypeScript app — dependency graph explorer, funding dashboard
-backend/     Rust service — indexes on-chain events, serves API for the frontend
-contracts/   Soroban smart contracts — dependency registry, streaming/splitting logic
+
+### 1. Clone the repo
+
+```bash
+git clone https://github.com/<your-username>/stellar-cascade.git
+cd stellar-cascade
 ```
+
+### 2. Contracts
+
+```bash
+cd contracts
+cargo build --target wasm32v1-none --release
+cargo test
+```
+
+To deploy to testnet (once contracts exist):
+```bash
+stellar contract deploy \
+  --wasm target/wasm32v1-none/release/<contract_name>.wasm \
+  --source <your-identity> \
+  --network testnet
+```
+
+### 3. Backend
+
+```bash
+cd backend
+cp .env.example .env   # fill in RPC URL, database connection, etc.
+cargo run
+```
+
+The API server will start on the port configured in `.env` (default `8080`).
+
+### 4. Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Visit `http://localhost:3000`.
+
+---
 
 ## Contributing
 
-Issues are open and welcome contributions across all three layers. See individual issue labels for scope and difficulty.
+This repo is structured to have well-scoped, independently workable issues across all three layers at any given time. Check the Issues tab for current tasks — each is labeled by layer (`frontend`, `backend`, `contracts`) and difficulty.
+

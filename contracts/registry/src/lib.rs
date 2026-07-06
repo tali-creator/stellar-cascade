@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, Vec};
 
 // ---------------------------------------------------------------------------
 // Data types (Issue #2)
@@ -70,22 +70,73 @@ pub const PROJECT_TTL_THRESHOLD_LEDGERS: u32 = 518_400; // ~30 days
 pub const PROJECT_TTL_EXTEND_TO_LEDGERS: u32 = 1_036_800; // ~60 days
 
 // ---------------------------------------------------------------------------
-// Contract (shell — read/write functions come in later issues)
+// Storage helpers (Issue #4)
+// ---------------------------------------------------------------------------
+//
+// All three functions are intentionally private (no `pub`).  They are
+// internal building blocks consumed by public contract methods added in later
+// issues; exposing them via #[contractimpl] is not required and would
+// unnecessarily widen the contract's ABI surface.
+//
+// Storage choice — why persistent() over temporary() or instance()?
+//
+// • `temporary()` — entries are permanently deleted on expiry and cannot be
+//   recovered.  Unsuitable for project registrations that must survive
+//   indefinitely.
+// • `instance()` — backed by the contract instance's single ledger entry,
+//   loaded on every invocation whether or not it is needed, and bounded by
+//   the instance TTL.  Suitable for a small, fixed set of global values
+//   (e.g. an admin address), not for an unbounded per-project map.
+// • `persistent()` — each entry has its own ledger key and its own TTL.
+//   Expired entries land in the Expired State Stack (ESS) and can be
+//   restored.  We extend the TTL explicitly on every write (and later on
+//   reads too) using the constants from Issue #3.  This is the correct
+//   choice for user-scoped records that must not be silently lost.
+
+/// Persist `project` under `DataKey::Project(project.id)` and refresh the
+/// entry's TTL so it won't expire for at least `PROJECT_TTL_EXTEND_TO_LEDGERS`
+/// ledgers from now.
+///
+/// Calling `extend_ttl` immediately after `set` is idiomatic in Soroban:
+/// `set` creates/overwrites the entry with the network-default minimum TTL,
+/// and `extend_ttl` bumps it to our desired lifetime in the same transaction.
+//
+// `dead_code` is expected here: these helpers are scaffolded for the public
+// contract methods arriving in the next issue.  The lint fires because no
+// `#[contractimpl]` method calls them yet.  Remove this attribute once the
+// first public method that uses them is added.
+#[allow(dead_code)]
+fn write_project(env: &Env, project: &Project) {
+    let key = DataKey::Project(project.id.clone());
+    env.storage().persistent().set(&key, project);
+    env.storage().persistent().extend_ttl(
+        &key,
+        PROJECT_TTL_THRESHOLD_LEDGERS,
+        PROJECT_TTL_EXTEND_TO_LEDGERS,
+    );
+}
+
+/// Return the `Project` stored under `id`, or `None` if no entry exists.
+#[allow(dead_code)]
+fn read_project(env: &Env, id: &BytesN<32>) -> Option<Project> {
+    let key = DataKey::Project(id.clone());
+    env.storage().persistent().get(&key)
+}
+
+/// Return `true` if a project with the given `id` exists in storage.
+///
+/// Prefer this over `read_project(...).is_some()` in call sites that only
+/// need existence — it avoids deserialising the full `Project` value.
+#[allow(dead_code)]
+fn project_exists(env: &Env, id: &BytesN<32>) -> bool {
+    let key = DataKey::Project(id.clone());
+    env.storage().persistent().has(&key)
+}
+
+// ---------------------------------------------------------------------------
+// Contract
 // ---------------------------------------------------------------------------
 
-/// Why persistent() over temporary() or instance()?
-///
-/// • `temporary()` — entries are permanently deleted on expiry; unsuitable for
-///   project registrations that must survive indefinitely.
-/// • `instance()` — shares the contract instance's TTL and is loaded on every
-///   invocation regardless of whether it is needed; appropriate for a small,
-///   fixed set of global values (e.g. an admin address), not for an
-///   unbounded map of per-project records.
-/// • `persistent()` — entries survive expiry via the Expired State Stack (ESS)
-///   and can be restored.  Per-project data is written and read independently,
-///   so each entry carries its own TTL that we extend explicitly whenever the
-///   entry is touched.  This is the right choice for user-scoped records that
-///   must not be lost.
 #[contract]
 pub struct RegistryContract;
 
@@ -99,29 +150,108 @@ impl RegistryContract {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::storage::Persistent as _;
+    use soroban_sdk::testutils::Address as _;
     use soroban_sdk::Env;
 
     /// Verify that the TTL constants are internally consistent: the extend-to
     /// target must be strictly greater than the threshold so that every
     /// successful extension actually increases the remaining lifetime.
-    #[test]
-    fn ttl_extend_to_exceeds_threshold() {
-        assert!(
-            PROJECT_TTL_EXTEND_TO_LEDGERS > PROJECT_TTL_THRESHOLD_LEDGERS,
-            "extend_to ({PROJECT_TTL_EXTEND_TO_LEDGERS}) must be > threshold \
-             ({PROJECT_TTL_THRESHOLD_LEDGERS})"
-        );
-    }
+    ///
+    /// Expressed as a compile-time `const` assertion so that the check is
+    /// evaluated by the compiler rather than at runtime, and to satisfy
+    /// `clippy::assertions_on_constants` under `--all-targets`.
+    const _: () = assert!(
+        PROJECT_TTL_EXTEND_TO_LEDGERS > PROJECT_TTL_THRESHOLD_LEDGERS,
+        "extend_to must be > threshold: every TTL extension must actually increase lifetime",
+    );
 
-    /// Verify that `DataKey::Project` can be constructed and that the `Env`
-    /// can round-trip it through its value representation without panicking.
+    /// Verify that `DataKey::Project` can be constructed without panicking.
     /// This exercises the `#[contracttype]` derive on `DataKey`.
     #[test]
     fn data_key_project_roundtrips() {
         let env = Env::default();
         let raw = [1u8; 32];
         let id = BytesN::from_array(&env, &raw);
-        // Construction must not panic.
         let _key = DataKey::Project(id);
+    }
+
+    fn make_project(env: &Env, seed: u8) -> Project {
+        let id = BytesN::from_array(env, &[seed; 32]);
+        let owner = Address::generate(env);
+        Project {
+            id,
+            owner,
+            receivers: Vec::new(env),
+        }
+    }
+
+    /// `project_exists` returns false before any write and true after.
+    #[test]
+    fn project_exists_before_and_after_write() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(RegistryContract, ());
+        env.as_contract(&contract_id, || {
+            let project = make_project(&env, 0x01);
+            assert!(!project_exists(&env, &project.id));
+            write_project(&env, &project);
+            assert!(project_exists(&env, &project.id));
+        });
+    }
+
+    /// `read_project` returns `None` before any write and `Some` with the
+    /// correct data after a write.
+    #[test]
+    fn read_project_returns_none_then_some() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(RegistryContract, ());
+        env.as_contract(&contract_id, || {
+            let project = make_project(&env, 0x02);
+            assert!(read_project(&env, &project.id).is_none());
+            write_project(&env, &project);
+            let stored = read_project(&env, &project.id).expect("project should exist");
+            assert_eq!(stored.id, project.id);
+            assert_eq!(stored.owner, project.owner);
+        });
+    }
+
+    /// Writing a project sets the TTL to at least `PROJECT_TTL_EXTEND_TO_LEDGERS`.
+    #[test]
+    fn write_project_sets_expected_ttl() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(RegistryContract, ());
+        env.as_contract(&contract_id, || {
+            let project = make_project(&env, 0x03);
+            write_project(&env, &project);
+            let key = DataKey::Project(project.id.clone());
+            let ttl = env.storage().persistent().get_ttl(&key);
+            assert!(
+                ttl >= PROJECT_TTL_EXTEND_TO_LEDGERS,
+                "TTL {ttl} should be >= PROJECT_TTL_EXTEND_TO_LEDGERS \
+                 ({PROJECT_TTL_EXTEND_TO_LEDGERS})"
+            );
+        });
+    }
+
+    /// Distinct project IDs are stored independently — writing one does not
+    /// affect the other.
+    #[test]
+    fn two_projects_stored_independently() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(RegistryContract, ());
+        env.as_contract(&contract_id, || {
+            let a = make_project(&env, 0xAA);
+            let b = make_project(&env, 0xBB);
+            write_project(&env, &a);
+            assert!(project_exists(&env, &a.id));
+            assert!(!project_exists(&env, &b.id));
+            write_project(&env, &b);
+            assert!(project_exists(&env, &a.id));
+            assert!(project_exists(&env, &b.id));
+        });
     }
 }

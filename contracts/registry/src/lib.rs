@@ -365,12 +365,13 @@ impl RegistryContract {
     ///    against the address recorded at registration time — never against a
     ///    caller-supplied address — so there is no way for a non-owner to
     ///    escalate privileges.
-    /// 3. Persist the updated [`Project`] (same `id` and `owner`, new
+    /// 3. Validate `new_receivers` via [`validate_receivers`] — the same rules
+    ///    enforced at registration (count bounds, exact percentage sum, no
+    ///    duplicate addresses).  No separate validation logic is used here;
+    ///    the shared helper is called directly so the two call sites can never
+    ///    drift apart.
+    /// 4. Persist the updated [`Project`] (same `id` and `owner`, new
     ///    `receivers`) via [`write_project`].
-    ///
-    /// Validation of `new_receivers` (percentage sum, duplicates, count bounds)
-    /// is added in Issue #18.  Do not rely on the absence of that check in
-    /// production code.
     pub fn update_splits(
         env: Env,
         id: BytesN<32>,
@@ -388,7 +389,10 @@ impl RegistryContract {
         // recorded at registration time.
         stored.owner.require_auth();
 
-        // Step 3 — persist the update.
+        // Step 3 — validate new receiver list (Issue #18).
+        validate_receivers(&new_receivers)?;
+
+        // Step 4 — persist the update.
         let updated = Project {
             id,
             owner: stored.owner,
@@ -1116,5 +1120,90 @@ mod tests {
 
         let stored = client.get_project(&id).expect("project must still exist");
         assert_eq!(stored.receivers.get(0).unwrap().address, new_addr);
+    }
+
+    // -----------------------------------------------------------------------
+    // update_splits — validation reuse (Issue #18)
+    // -----------------------------------------------------------------------
+
+    /// `update_splits` rejects a `new_receivers` list with an invalid
+    /// percentage sum, returning `InvalidPercentageSum`.
+    #[test]
+    fn update_splits_rejects_invalid_percentage_sum() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(RegistryContract, ());
+        let client = RegistryContractClient::new(&env, &contract_id);
+
+        let id = BytesN::from_array(&env, &[0xE3u8; 32]);
+        let owner = Address::generate(&env);
+        client.register_project(&owner, &id, &make_receivers(&env, &owner));
+
+        // 50% only — does not sum to 10 000 bp.
+        let addr = Address::generate(&env);
+        let mut bad: Vec<Receiver> = Vec::new(&env);
+        bad.push_back(Receiver {
+            address: addr,
+            percentage: 5_000,
+        });
+
+        let err = client
+            .try_update_splits(&id, &bad)
+            .expect_err("should fail");
+        assert_eq!(err.unwrap(), RegistryError::InvalidPercentageSum);
+    }
+
+    /// `update_splits` rejects a `new_receivers` list with a duplicated
+    /// address, returning `DuplicateReceiver`.
+    #[test]
+    fn update_splits_rejects_duplicate_receiver() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(RegistryContract, ());
+        let client = RegistryContractClient::new(&env, &contract_id);
+
+        let id = BytesN::from_array(&env, &[0xE4u8; 32]);
+        let owner = Address::generate(&env);
+        client.register_project(&owner, &id, &make_receivers(&env, &owner));
+
+        let dup = Address::generate(&env);
+        let mut bad: Vec<Receiver> = Vec::new(&env);
+        bad.push_back(Receiver {
+            address: dup.clone(),
+            percentage: 5_000,
+        });
+        bad.push_back(Receiver {
+            address: dup.clone(),
+            percentage: 5_000,
+        });
+
+        let err = client
+            .try_update_splits(&id, &bad)
+            .expect_err("should fail");
+        assert_eq!(err.unwrap(), RegistryError::DuplicateReceiver);
+    }
+
+    /// `update_splits` rejects an empty `new_receivers` list, returning
+    /// `TooFewReceivers`.
+    #[test]
+    fn update_splits_rejects_empty_receiver_list() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(RegistryContract, ());
+        let client = RegistryContractClient::new(&env, &contract_id);
+
+        let id = BytesN::from_array(&env, &[0xE5u8; 32]);
+        let owner = Address::generate(&env);
+        client.register_project(&owner, &id, &make_receivers(&env, &owner));
+
+        let empty: Vec<Receiver> = Vec::new(&env);
+
+        let err = client
+            .try_update_splits(&id, &empty)
+            .expect_err("should fail");
+        assert_eq!(err.unwrap(), RegistryError::TooFewReceivers);
     }
 }

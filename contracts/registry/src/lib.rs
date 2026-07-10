@@ -1,6 +1,8 @@
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Vec};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Symbol, Vec,
+};
 
 // ---------------------------------------------------------------------------
 // Data types (Issue #2)
@@ -280,6 +282,9 @@ impl RegistryContract {
     ///    exact percentage sum, and no duplicate addresses.
     /// 4. Persist the new [`Project`] via [`write_project`], extending the
     ///    entry TTL to [`PROJECT_TTL_EXTEND_TO_LEDGERS`].
+    /// 5. Emit a `register` event so off-chain services can detect new
+    ///    registrations without polling storage.
+    #[allow(deprecated)]
     pub fn register_project(
         env: Env,
         owner: Address,
@@ -299,13 +304,41 @@ impl RegistryContract {
 
         // Step 4 — persist.
         let project = Project {
-            id,
-            owner,
-            receivers,
+            id: id.clone(),
+            owner: owner.clone(),
+            receivers: receivers.clone(),
         };
         write_project(&env, &project);
 
+        // Step 5 — emit registration event (Issue #15).
+        //
+        // Event schema (backend contract):
+        //   topics : ("register", project_id: BytesN<32>)
+        //   data   : (owner_address: Address, receiver_count: u32)
+        //
+        // The backend service listens for this event to detect new project
+        // registrations without polling contract storage on every ledger.
+        env.events().publish(
+            (Symbol::new(&env, "register"), id),
+            (owner, receivers.len()),
+        );
+
         Ok(())
+    }
+
+    /// Return `true` if a project with the given `id` is registered, `false`
+    /// otherwise.
+    ///
+    /// This is a lightweight existence check that avoids deserializing the full
+    /// [`Project`] struct.  Prefer this over [`get_project`] when the caller
+    /// only needs to know whether a project exists.
+    ///
+    /// # No authorization required
+    ///
+    /// Consistent with the read-transparency design established in
+    /// [`get_project`] — splits metadata is publicly visible to any caller.
+    pub fn has_project(env: Env, id: BytesN<32>) -> bool {
+        project_exists(&env, &id)
     }
 
     /// Return the full [`Project`] record for a registered project, or `None`
@@ -320,6 +353,51 @@ impl RegistryContract {
     pub fn get_project(env: Env, id: BytesN<32>) -> Option<Project> {
         read_project(&env, &id)
     }
+
+    /// Replace the receiver list for an existing project.
+    ///
+    /// Steps (in order):
+    /// 1. Read the stored [`Project`] for `id`.  Return
+    ///    [`RegistryError::ProjectNotFound`] immediately if the project does
+    ///    not exist.
+    /// 2. Require the **stored** owner address to have signed the transaction
+    ///    (`stored_project.owner.require_auth()`).  Authorization is checked
+    ///    against the address recorded at registration time — never against a
+    ///    caller-supplied address — so there is no way for a non-owner to
+    ///    escalate privileges.
+    /// 3. Persist the updated [`Project`] (same `id` and `owner`, new
+    ///    `receivers`) via [`write_project`].
+    ///
+    /// Validation of `new_receivers` (percentage sum, duplicates, count bounds)
+    /// is added in Issue #18.  Do not rely on the absence of that check in
+    /// production code.
+    pub fn update_splits(
+        env: Env,
+        id: BytesN<32>,
+        new_receivers: Vec<Receiver>,
+    ) -> Result<(), RegistryError> {
+        // Step 1 — existence check (Issue #16).
+        let stored = match read_project(&env, &id) {
+            Some(p) => p,
+            None => return Err(RegistryError::ProjectNotFound),
+        };
+
+        // Step 2 — authorize against the stored owner (Issue #17).
+        // Authorizing against a caller-supplied address would allow anyone to
+        // pass their own address and satisfy the check — always use the owner
+        // recorded at registration time.
+        stored.owner.require_auth();
+
+        // Step 3 — persist the update.
+        let updated = Project {
+            id,
+            owner: stored.owner,
+            receivers: new_receivers,
+        };
+        write_project(&env, &updated);
+
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -331,7 +409,9 @@ mod tests {
     use super::*;
     use soroban_sdk::testutils::storage::Persistent as _;
     use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::Events as _;
     use soroban_sdk::Env;
+    use soroban_sdk::IntoVal;
 
     /// Verify that the TTL constants are internally consistent: the extend-to
     /// target must be strictly greater than the threshold so that every
@@ -847,5 +927,194 @@ mod tests {
         assert_eq!(project.receivers.get(0).unwrap().percentage, 7_000);
         assert_eq!(project.receivers.get(1).unwrap().address, addr_b);
         assert_eq!(project.receivers.get(1).unwrap().percentage, 3_000);
+    }
+
+    // -----------------------------------------------------------------------
+    // has_project (Issue #14)
+    // -----------------------------------------------------------------------
+
+    /// `has_project` returns `false` for an unregistered ID and `true`
+    /// immediately after a successful `register_project` call.
+    #[test]
+    fn has_project_returns_false_then_true() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(RegistryContract, ());
+        let client = RegistryContractClient::new(&env, &contract_id);
+
+        let id = BytesN::from_array(&env, &[0xF1u8; 32]);
+        let owner = Address::generate(&env);
+
+        // Before registration: must return false.
+        assert!(!client.has_project(&id));
+
+        client.register_project(&owner, &id, &make_receivers(&env, &owner));
+
+        // After registration: must return true.
+        assert!(client.has_project(&id));
+    }
+
+    // -----------------------------------------------------------------------
+    // register_project event (Issue #15)
+    // -----------------------------------------------------------------------
+
+    /// A successful `register_project` call publishes exactly one event with
+    /// topics `("register", project_id)` and data `(owner, receiver_count)`.
+    #[test]
+    fn register_project_emits_registration_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(RegistryContract, ());
+        let client = RegistryContractClient::new(&env, &contract_id);
+
+        let id = BytesN::from_array(&env, &[0xF2u8; 32]);
+        let owner = Address::generate(&env);
+        let receivers = make_receivers(&env, &owner);
+
+        client.register_project(&owner, &id, &receivers);
+
+        // Build the expected event list and compare using the SDK's PartialEq impl.
+        // Topics: (Symbol("register"), project_id: BytesN<32>)
+        // Data:   (owner: Address, receiver_count: u32)
+        let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> = soroban_sdk::vec![
+            &env,
+            Symbol::new(&env, "register").into_val(&env),
+            id.into_val(&env),
+        ];
+        let expected_data: soroban_sdk::Val = (owner.clone(), 1u32).into_val(&env);
+
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![&env, (contract_id, expected_topics, expected_data),],
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // update_splits — existence check (Issue #16)
+    // -----------------------------------------------------------------------
+
+    /// `update_splits` on a nonexistent ID returns `ProjectNotFound`.
+    #[test]
+    fn update_splits_returns_not_found_for_missing_id() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(RegistryContract, ());
+        let client = RegistryContractClient::new(&env, &contract_id);
+
+        let id = BytesN::from_array(&env, &[0xC1u8; 32]);
+        let new_receiver = Address::generate(&env);
+        let new_receivers = make_receivers(&env, &new_receiver);
+
+        let err = client
+            .try_update_splits(&id, &new_receivers)
+            .expect_err("should fail for unregistered id");
+        assert_eq!(err.unwrap(), RegistryError::ProjectNotFound);
+    }
+
+    /// `update_splits` on an existing project overwrites the receiver list.
+    #[test]
+    fn update_splits_overwrites_receivers() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(RegistryContract, ());
+        let client = RegistryContractClient::new(&env, &contract_id);
+
+        let id = BytesN::from_array(&env, &[0xC2u8; 32]);
+        let owner = Address::generate(&env);
+        let initial_receivers = make_receivers(&env, &owner);
+
+        client.register_project(&owner, &id, &initial_receivers);
+
+        // Replace with a two-receiver split.
+        let addr_a = Address::generate(&env);
+        let addr_b = Address::generate(&env);
+        let mut new_receivers: Vec<Receiver> = Vec::new(&env);
+        new_receivers.push_back(Receiver {
+            address: addr_a.clone(),
+            percentage: 6_000,
+        });
+        new_receivers.push_back(Receiver {
+            address: addr_b.clone(),
+            percentage: 4_000,
+        });
+
+        client.update_splits(&id, &new_receivers);
+
+        let stored = client.get_project(&id).expect("project must still exist");
+        assert_eq!(stored.owner, owner, "owner must not change");
+        assert_eq!(stored.receivers.len(), 2);
+        assert_eq!(stored.receivers.get(0).unwrap().address, addr_a);
+        assert_eq!(stored.receivers.get(1).unwrap().address, addr_b);
+    }
+
+    // -----------------------------------------------------------------------
+    // update_splits — authorization (Issue #17)
+    // -----------------------------------------------------------------------
+
+    /// A non-owner calling `update_splits` traps — authorization is enforced
+    /// against the stored owner, not any caller-supplied address.
+    #[test]
+    #[should_panic]
+    fn update_splits_rejects_non_owner() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(RegistryContract, ());
+        let client = RegistryContractClient::new(&env, &contract_id);
+
+        let id = BytesN::from_array(&env, &[0xD1u8; 32]);
+        let owner = Address::generate(&env);
+        client.register_project(&owner, &id, &make_receivers(&env, &owner));
+
+        // Create a fresh env without mock_all_auths so require_auth enforces
+        // the stored owner.  We re-register the contract at the same address
+        // so storage is preserved, but auth is no longer mocked globally.
+        let env2 = Env::default();
+        // Re-register to the same address so we can call into its storage.
+        let contract_id2 = env2.register(RegistryContract, ());
+
+        // Write the project directly into the new env's storage so the call
+        // has something to find, then call without any auth mocked.
+        env2.as_contract(&contract_id2, || {
+            write_project(
+                &env2,
+                &Project {
+                    id: id.clone(),
+                    owner: owner.clone(),
+                    receivers: make_receivers(&env2, &owner),
+                },
+            );
+        });
+
+        let client2 = RegistryContractClient::new(&env2, &contract_id2);
+        // No mock_all_auths — require_auth on the stored owner should trap.
+        client2.update_splits(&id, &make_receivers(&env2, &owner));
+    }
+
+    /// The legitimate owner can successfully call `update_splits`.
+    #[test]
+    fn update_splits_succeeds_for_owner() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(RegistryContract, ());
+        let client = RegistryContractClient::new(&env, &contract_id);
+
+        let id = BytesN::from_array(&env, &[0xD2u8; 32]);
+        let owner = Address::generate(&env);
+        let new_addr = Address::generate(&env);
+
+        client.register_project(&owner, &id, &make_receivers(&env, &owner));
+
+        // Owner updates to a different receiver — mock_all_auths satisfies
+        // require_auth for the stored owner address.
+        client.update_splits(&id, &make_receivers(&env, &new_addr));
+
+        let stored = client.get_project(&id).expect("project must still exist");
+        assert_eq!(stored.receivers.get(0).unwrap().address, new_addr);
     }
 }

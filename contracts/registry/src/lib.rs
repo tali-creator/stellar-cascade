@@ -394,11 +394,24 @@ impl RegistryContract {
 
         // Step 4 — persist the update.
         let updated = Project {
-            id,
+            id: id.clone(),
             owner: stored.owner,
-            receivers: new_receivers,
+            receivers: new_receivers.clone(),
         };
         write_project(&env, &updated);
+
+        // Step 5 — emit update event (Issue #19).
+        //
+        // Event schema (backend contract):
+        //   topics : ("update", project_id: BytesN<32>)
+        //   data   : (new_receiver_count: u32)
+        //
+        // Distinct from the "register" event emitted by register_project so
+        // downstream listeners can distinguish new registrations from updates
+        // without inspecting the data payload.
+        #[allow(deprecated)]
+        env.events()
+            .publish((Symbol::new(&env, "update"), id), new_receivers.len());
 
         Ok(())
     }
@@ -1205,5 +1218,222 @@ mod tests {
             .try_update_splits(&id, &empty)
             .expect_err("should fail");
         assert_eq!(err.unwrap(), RegistryError::TooFewReceivers);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #21 — register_project success path (additional coverage)
+    // -----------------------------------------------------------------------
+
+    /// Register a project with exactly 2 receivers and confirm every field
+    /// of the stored record matches what was submitted.
+    #[test]
+    fn register_project_two_receivers_fields_match() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(RegistryContract, ());
+        let client = RegistryContractClient::new(&env, &contract_id);
+
+        let id = BytesN::from_array(&env, &[0x41u8; 32]);
+        let owner = Address::generate(&env);
+        let addr_a = Address::generate(&env);
+        let addr_b = Address::generate(&env);
+
+        let mut receivers: Vec<Receiver> = Vec::new(&env);
+        receivers.push_back(Receiver {
+            address: addr_a.clone(),
+            percentage: 6_000,
+        });
+        receivers.push_back(Receiver {
+            address: addr_b.clone(),
+            percentage: 4_000,
+        });
+
+        client.register_project(&owner, &id, &receivers);
+
+        let stored = client.get_project(&id).expect("project must exist");
+        assert_eq!(stored.id, id);
+        assert_eq!(stored.owner, owner);
+        assert_eq!(stored.receivers.len(), 2);
+        assert_eq!(stored.receivers.get(0).unwrap().address, addr_a);
+        assert_eq!(stored.receivers.get(0).unwrap().percentage, 6_000);
+        assert_eq!(stored.receivers.get(1).unwrap().address, addr_b);
+        assert_eq!(stored.receivers.get(1).unwrap().percentage, 4_000);
+    }
+
+    /// Registering a project with exactly MAX_RECEIVERS entries succeeds —
+    /// the upper boundary is a valid success case, not just below it.
+    /// (Boundary already verified via validate_receivers_accepts_max_receivers;
+    /// this test confirms the full register_project path with MAX_RECEIVERS.)
+    #[test]
+    fn register_project_max_receivers_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(RegistryContract, ());
+        let client = RegistryContractClient::new(&env, &contract_id);
+
+        let id = BytesN::from_array(&env, &[0x42u8; 32]);
+        let owner = Address::generate(&env);
+
+        // 20 × 500 bp = 10 000 bp.
+        let mut receivers: Vec<Receiver> = Vec::new(&env);
+        for _ in 0..MAX_RECEIVERS {
+            receivers.push_back(Receiver {
+                address: Address::generate(&env),
+                percentage: 500,
+            });
+        }
+
+        client.register_project(&owner, &id, &receivers);
+
+        let stored = client.get_project(&id).expect("project must exist");
+        assert_eq!(stored.receivers.len(), MAX_RECEIVERS);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #23 — get_project and has_project no-auth-required
+    // -----------------------------------------------------------------------
+
+    /// `get_project` and `has_project` are callable with no authorization
+    /// context in the test environment, confirming neither function calls
+    /// `require_auth()` internally.  Any mistaken addition of an auth check
+    /// to either read path would cause this test to panic.
+    #[test]
+    fn read_functions_require_no_authorization() {
+        let env = Env::default();
+        // Deliberately do NOT call env.mock_all_auths() — no auth context at all.
+
+        let contract_id = env.register(RegistryContract, ());
+        let client = RegistryContractClient::new(&env, &contract_id);
+
+        let id = BytesN::from_array(&env, &[0x43u8; 32]);
+
+        // Reads on an unregistered ID must succeed without any auth.
+        assert!(client.get_project(&id).is_none());
+        assert!(!client.has_project(&id));
+
+        // Seed a project directly via the storage helper (no auth needed for a
+        // direct write_project call inside as_contract).
+        let owner = Address::generate(&env);
+        let receivers = make_receivers(&env, &owner);
+        let project = Project {
+            id: id.clone(),
+            owner: owner.clone(),
+            receivers: receivers.clone(),
+        };
+        env.as_contract(&contract_id, || {
+            write_project(&env, &project);
+        });
+
+        // Both reads must still succeed with no auth mocked — confirming
+        // require_auth() is never called on either read path.
+        assert!(client.get_project(&id).is_some());
+        assert!(client.has_project(&id));
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #19 / #24 — update_splits event and no-event-on-failure
+    // -----------------------------------------------------------------------
+
+    /// A successful `update_splits` call emits exactly one "update" event
+    /// with topics `("update", project_id)` and data `(new_receiver_count)`.
+    #[test]
+    fn update_splits_emits_update_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(RegistryContract, ());
+        let client = RegistryContractClient::new(&env, &contract_id);
+
+        let id = BytesN::from_array(&env, &[0x51u8; 32]);
+        let owner = Address::generate(&env);
+        let new_addr = Address::generate(&env);
+
+        client.register_project(&owner, &id, &make_receivers(&env, &owner));
+        client.update_splits(&id, &make_receivers(&env, &new_addr));
+
+        // env.events().all() returns only the events from the most recent
+        // contract invocation.  After update_splits, that is exactly one
+        // "update" event with topics ("update", project_id) and data
+        // new_receiver_count (u32 = 1 for make_receivers).
+        let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> = soroban_sdk::vec![
+            &env,
+            Symbol::new(&env, "update").into_val(&env),
+            id.into_val(&env),
+        ];
+        let expected_data: soroban_sdk::Val = 1u32.into_val(&env);
+
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![&env, (contract_id.clone(), expected_topics, expected_data),],
+        );
+    }
+
+    /// No event is emitted when `update_splits` fails validation.
+    #[test]
+    fn update_splits_no_event_on_validation_failure() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(RegistryContract, ());
+        let client = RegistryContractClient::new(&env, &contract_id);
+
+        let id = BytesN::from_array(&env, &[0x53u8; 32]);
+        let owner = Address::generate(&env);
+        client.register_project(&owner, &id, &make_receivers(&env, &owner));
+
+        // Invalid: sum is only 50%.
+        let bad_addr = Address::generate(&env);
+        let mut bad: Vec<Receiver> = Vec::new(&env);
+        bad.push_back(Receiver {
+            address: bad_addr,
+            percentage: 5_000,
+        });
+        let _ = client.try_update_splits(&id, &bad);
+
+        // env.events().all() reflects only the most recent invocation.
+        // A failed call produces no contract events — the list must be empty.
+        assert!(
+            env.events().all().events().is_empty(),
+            "no event should be emitted on validation failure"
+        );
+    }
+
+    /// `update_splits` rejects a `new_receivers` list exceeding `MAX_RECEIVERS`,
+    /// returning `TooManyReceivers`.
+    #[test]
+    fn update_splits_rejects_too_many_receivers() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(RegistryContract, ());
+        let client = RegistryContractClient::new(&env, &contract_id);
+
+        let id = BytesN::from_array(&env, &[0x54u8; 32]);
+        let owner = Address::generate(&env);
+        client.register_project(&owner, &id, &make_receivers(&env, &owner));
+
+        // 21 distinct receivers summing to 10 000 bp.
+        let count = MAX_RECEIVERS + 1;
+        let share = 10_000u32 / count;
+        let remainder = 10_000u32 - share * count;
+        let mut bad: Vec<Receiver> = Vec::new(&env);
+        for i in 0..count {
+            let pct = if i == count - 1 {
+                share + remainder
+            } else {
+                share
+            };
+            bad.push_back(Receiver {
+                address: Address::generate(&env),
+                percentage: pct,
+            });
+        }
+
+        let err = client
+            .try_update_splits(&id, &bad)
+            .expect_err("should fail");
+        assert_eq!(err.unwrap(), RegistryError::TooManyReceivers);
     }
 }

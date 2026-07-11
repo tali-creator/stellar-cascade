@@ -5,10 +5,10 @@
 | Field              | Value                                                              |
 |--------------------|--------------------------------------------------------------------|
 | Network            | Stellar Testnet (`Test SDF Network ; September 2015`)              |
-| Contract ID        | _pending — see note below_                                         |
-| Deployer address   | _pending — see note below_                                         |
-| Deployment date    | _pending — see note below_                                         |
-| WASM artifact      | `contracts/registry/target/wasm32-unknown-unknown/release/contracts_registry.wasm` |
+| Contract ID        | `CC4BP273CO73T6AXOMILHWXF37EJ5B766JEOKCYTET4YBHE3FX46GYNI`        |
+| Deployer address   | `GALDKWEV7OOWI45GUJT3X6LKNER6IBRK6RB5BZGE776HZ2RPBFSZHNRB`        |
+| Deployment date    | 2026-07-11                                                         |
+| WASM artifact      | `contracts/registry/target/wasm32v1-none/release/contracts_registry.wasm` |
 
 ### Deployment note
 

@@ -1,8 +1,18 @@
+mod routes;
+
 use std::net::SocketAddr;
 
-use axum::Router;
+use axum::{Router, routing::get};
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt};
+
+/// Builds and returns the application router.
+///
+/// Extracted from `main` so tests can call `router()` directly without
+/// binding a real port.
+pub fn router() -> Router {
+    Router::new().route("/health", get(routes::health::handler))
+}
 
 #[tokio::main]
 async fn main() {
@@ -21,16 +31,11 @@ async fn main() {
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
-    // Empty router — routes will be added in subsequent issues.
-    let app = Router::new();
-
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("failed to bind TCP listener");
 
     info!("cascade backend listening on {addr}");
 
-    axum::serve(listener, app)
-        .await
-        .expect("server error");
+    axum::serve(listener, router()).await.expect("server error");
 }

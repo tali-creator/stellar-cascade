@@ -25,7 +25,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-TARGET_DIR="$WORKSPACE_ROOT/target/wasm32-unknown-unknown/release"
+TARGET_DIR="$WORKSPACE_ROOT/target/wasm32v1-none/release"
 WASM_RAW="$TARGET_DIR/contracts_registry.wasm"
 WASM_OPT="$TARGET_DIR/contracts_registry.optimized.wasm"
 
@@ -45,7 +45,7 @@ fi
 
 echo "==> Building release WASM..."
 cargo build \
-    --target wasm32-unknown-unknown \
+    --target wasm32v1-none \
     --release \
     --manifest-path "$SCRIPT_DIR/Cargo.toml" \
     --package contracts-registry

@@ -45,6 +45,12 @@ cascade/
 
 The source of truth. All financial logic — registering projects, storing split configurations, streaming/accruing funds, and letting recipients claim — lives here and is enforced on-chain. Nothing in the backend or frontend can move funds; they can only read state and submit transactions a user has signed.
 
+**Deployed contracts**
+
+| Contract | Network | README | Deployments |
+|---|---|---|---|
+| Splits Registry | Testnet | [`contracts/registry/README.md`](contracts/registry/README.md) | [`contracts/registry/DEPLOYMENTS.md`](contracts/registry/DEPLOYMENTS.md) |
+
 ### `backend/` — Rust service (Axum)
 
 Sits between the contracts and the frontend. Responsibilities:

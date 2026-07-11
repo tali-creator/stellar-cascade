@@ -1,3 +1,36 @@
-fn main() {
-    println!("Hello, world!");
+use std::net::SocketAddr;
+
+use axum::Router;
+use tracing::info;
+use tracing_subscriber::{EnvFilter, fmt};
+
+#[tokio::main]
+async fn main() {
+    // Initialise tracing — respects RUST_LOG env var, defaults to "info".
+    fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+
+    // Port is configurable via PORT env var; default 3000.
+    let port: u16 = std::env::var("PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3000);
+
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+
+    // Empty router — routes will be added in subsequent issues.
+    let app = Router::new();
+
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .expect("failed to bind TCP listener");
+
+    info!("cascade backend listening on {addr}");
+
+    axum::serve(listener, app)
+        .await
+        .expect("server error");
 }

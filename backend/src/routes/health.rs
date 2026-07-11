@@ -27,11 +27,11 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt; // for `oneshot`
 
-    use crate::router;
+    use crate::router_for_test;
 
     #[tokio::test]
     async fn health_returns_200_with_ok_body() {
-        let app = router();
+        let app = router_for_test();
 
         let response = app
             .oneshot(
@@ -52,7 +52,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_content_type_is_json() {
-        let app = router();
+        let app = router_for_test();
 
         let response = app
             .oneshot(

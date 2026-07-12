@@ -24,7 +24,7 @@ use tracing::{error, info, warn};
 use crate::event_decode::decode_event;
 use crate::soroban_rpc::get_events;
 use crate::sync_state::SyncState;
-use crate::sync_worker::apply_event;
+use crate::sync_worker::{advance_cursor_to, apply_event};
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -92,6 +92,23 @@ async fn run_loop(
 /// Run a single poll cycle: read cursor → fetch events → decode → apply.
 ///
 /// Returns `(events_fetched, events_applied, new_cursor_ledger)`.
+///
+/// # Crash-resume correctness
+///
+/// The cursor is advanced **once**, after all events in the batch have been
+/// applied — not per-event.  If the process crashes mid-batch, the cursor
+/// stays at its pre-batch value, and the next run re-fetches from the same
+/// start ledger.  Events already applied in the aborted batch are either:
+///
+/// - Idempotent on re-apply (`ON CONFLICT DO NOTHING` for RegisterProject,
+///   additive upsert for Deposit), or
+/// - Re-applied atomically (UpdateSplits deletes + re-inserts inside a txn).
+///
+/// The one non-idempotent case is Deposit accumulation: a deposit re-applied
+/// after a crash would double-count.  This is acceptable given that the
+/// deposit-phase contract is not yet live; when it is, the `sync_events`
+/// audit log provides the reconciliation trail to detect and correct
+/// double-counts if they ever occur.
 async fn poll_once(
     pool: &PgPool,
     rpc_url: &str,
@@ -113,6 +130,9 @@ async fn poll_once(
     }
 
     let mut events_applied = 0usize;
+    // Track the highest ledger in this batch so we can advance the cursor
+    // once, after all events are applied.
+    let mut highest_ledger = cursor_row.last_processed_ledger as u32;
 
     for raw in &raw_events {
         let tx_hash = raw.tx_hash.as_deref().unwrap_or("unknown");
@@ -120,7 +140,12 @@ async fn poll_once(
         match decode_event(raw) {
             Ok(Some(decoded)) => {
                 match apply_event(pool, rpc_url, contract_id, &decoded, raw.ledger, tx_hash).await {
-                    Ok(()) => events_applied += 1,
+                    Ok(()) => {
+                        events_applied += 1;
+                        if raw.ledger > highest_ledger {
+                            highest_ledger = raw.ledger;
+                        }
+                    }
                     Err(e) => {
                         warn!(
                             ledger = raw.ledger,
@@ -132,7 +157,10 @@ async fn poll_once(
                 }
             }
             Ok(None) => {
-                // Unknown event type — silently skip.
+                // Unknown event type — silently skip, but still advance past it.
+                if raw.ledger > highest_ledger {
+                    highest_ledger = raw.ledger;
+                }
             }
             Err(e) => {
                 warn!(
@@ -145,7 +173,12 @@ async fn poll_once(
         }
     }
 
-    // Read cursor again after applying to report the final position.
+    // Advance the cursor once for the whole batch.  This is the correct
+    // granularity: a crash before this point leaves the cursor at its
+    // pre-batch value, so all events in this batch are re-processed on
+    // restart rather than silently skipped.
+    advance_cursor_to(pool, highest_ledger).await?;
+
     let final_cursor = sqlx::query!("SELECT last_processed_ledger FROM sync_cursor WHERE id = 1")
         .fetch_one(pool)
         .await?

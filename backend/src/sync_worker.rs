@@ -51,8 +51,11 @@ pub enum SyncError {
 
 /// Apply a single decoded event to the database.
 ///
-/// Wraps all writes (state + audit log + cursor advance) in a single
-/// transaction so the DB is never left in a partially-applied state.
+/// Wraps all writes (state + audit log) in a single transaction.
+/// **Does not advance `sync_cursor`** — the caller (`poll_once`) is
+/// responsible for advancing the cursor once after the full batch is
+/// applied, so a crash mid-batch doesn't leave the cursor pointing past
+/// un-applied events.
 pub async fn apply_event(
     pool: &PgPool,
     rpc_url: &str,
@@ -128,10 +131,34 @@ pub async fn apply_event(
         }
     }
 
-    advance_cursor(&mut txn, ledger).await?;
     txn.commit().await?;
 
     debug!(ledger, tx_hash, "applied event");
+    Ok(())
+}
+
+/// Advance `sync_cursor.last_processed_ledger` to `ledger`.
+///
+/// Called once by `poll_once` after **all** events in a batch have been
+/// applied, not per-event.  This is the correct granularity: if the process
+/// crashes mid-batch, the cursor stays at its pre-batch value so every
+/// unprocessed event in that batch is re-fetched on restart.
+///
+/// Uses `GREATEST` so out-of-order calls (e.g. two concurrent workers, or
+/// a ledger being re-processed after a rollback) never move the cursor
+/// backwards.
+pub async fn advance_cursor_to(pool: &PgPool, ledger: u32) -> Result<(), SyncError> {
+    sqlx::query!(
+        r#"
+        UPDATE sync_cursor
+        SET last_processed_ledger = GREATEST(last_processed_ledger, $1),
+            updated_at = now()
+        WHERE id = 1
+        "#,
+        ledger as i64,
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -293,7 +320,7 @@ async fn upsert_splits(
 }
 
 // ---------------------------------------------------------------------------
-// Audit log + cursor
+// Audit log
 // ---------------------------------------------------------------------------
 
 async fn append_sync_event(
@@ -312,23 +339,6 @@ async fn append_sync_event(
         tx_hash,
         event_type,
         raw_data,
-    )
-    .execute(&mut **txn)
-    .await?;
-    Ok(())
-}
-
-async fn advance_cursor(txn: &mut Transaction<'_, Postgres>, ledger: u32) -> Result<(), SyncError> {
-    // Only advance if the new ledger is strictly greater than the stored one,
-    // so a batch processed out of order never moves the cursor backwards.
-    sqlx::query!(
-        r#"
-        UPDATE sync_cursor
-        SET last_processed_ledger = GREATEST(last_processed_ledger, $1),
-            updated_at = now()
-        WHERE id = 1
-        "#,
-        ledger as i64,
     )
     .execute(&mut **txn)
     .await?;

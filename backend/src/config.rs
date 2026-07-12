@@ -2,10 +2,10 @@ use std::env;
 
 /// Typed configuration loaded once at startup from environment variables.
 ///
-/// All fields have sensible defaults so the service boots with zero
-/// configuration in a dev environment.  As new integrations land
-/// (Postgres, Soroban RPC) their required vars will be added here and
-/// marked accordingly.
+/// Optional fields have sensible defaults.  Required fields (currently only
+/// `database_url`) cause an immediate, descriptive error if absent — the
+/// process exits before binding a port rather than failing obscurely on the
+/// first query.
 ///
 /// Load order:
 ///   1. A `.env` file in the working directory (dev convenience, no-op in prod).
@@ -18,6 +18,10 @@ pub struct Config {
     /// Tracing filter string forwarded to `tracing_subscriber`.
     /// Controls verbosity via `RUST_LOG`.  Default: "info".
     pub rust_log: String,
+
+    /// Postgres connection string.  **Required.**
+    /// Example: `postgres://cascade:cascade@localhost:5432/cascade`
+    pub database_url: String,
 }
 
 impl Config {
@@ -29,9 +33,8 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Returns an error string if a variable is present but unparseable
-    /// (e.g. `PORT=banana`).  Missing optional variables fall back to their
-    /// defaults without error.
+    /// Returns an error string if a required variable is absent, or if any
+    /// variable is present but unparseable (e.g. `PORT=banana`).
     pub fn from_env() -> Result<Self, String> {
         // Load .env if present; ignore the error if it doesn't exist.
         let _ = dotenvy::dotenv();
@@ -39,6 +42,7 @@ impl Config {
         Self::from_vars(
             env::var("PORT").ok().as_deref(),
             env::var("RUST_LOG").ok().as_deref(),
+            env::var("DATABASE_URL").ok().as_deref(),
         )
     }
 
@@ -47,7 +51,11 @@ impl Config {
     /// `None` means the variable was absent; `Some(s)` means it was set to
     /// `s`.  This is the testable core — `from_env` is a thin wrapper that
     /// reads the real environment and delegates here.
-    fn from_vars(port: Option<&str>, rust_log: Option<&str>) -> Result<Self, String> {
+    pub(crate) fn from_vars(
+        port: Option<&str>,
+        rust_log: Option<&str>,
+        database_url: Option<&str>,
+    ) -> Result<Self, String> {
         let port = match port {
             Some(val) => val
                 .parse::<u16>()
@@ -57,7 +65,19 @@ impl Config {
 
         let rust_log = rust_log.unwrap_or("info").to_string();
 
-        Ok(Config { port, rust_log })
+        let database_url = database_url
+            .ok_or_else(|| {
+                "DATABASE_URL is required but was not set.\n\
+                 Hint: copy backend/.env.example to backend/.env and fill in the value."
+                    .to_string()
+            })?
+            .to_string();
+
+        Ok(Config {
+            port,
+            rust_log,
+            database_url,
+        })
     }
 }
 
@@ -69,22 +89,25 @@ impl Config {
 mod tests {
     use super::Config;
 
+    const DB: &str = "postgres://cascade:cascade@localhost:5432/cascade";
+
     #[test]
-    fn defaults_when_vars_absent() {
-        let cfg = Config::from_vars(None, None).expect("should load with defaults");
+    fn defaults_when_optional_vars_absent() {
+        let cfg = Config::from_vars(None, None, Some(DB)).expect("should load with defaults");
         assert_eq!(cfg.port, 3000);
         assert_eq!(cfg.rust_log, "info");
+        assert_eq!(cfg.database_url, DB);
     }
 
     #[test]
     fn respects_port_var() {
-        let cfg = Config::from_vars(Some("8080"), None).expect("should load");
+        let cfg = Config::from_vars(Some("8080"), None, Some(DB)).expect("should load");
         assert_eq!(cfg.port, 8080);
     }
 
     #[test]
     fn rejects_invalid_port() {
-        let err = Config::from_vars(Some("banana"), None).expect_err("should fail");
+        let err = Config::from_vars(Some("banana"), None, Some(DB)).expect_err("should fail");
         assert!(
             err.contains("PORT"),
             "error should mention PORT, got: {err}"
@@ -93,22 +116,37 @@ mod tests {
 
     #[test]
     fn respects_rust_log_var() {
-        let cfg = Config::from_vars(None, Some("debug")).expect("should load");
+        let cfg = Config::from_vars(None, Some("debug"), Some(DB)).expect("should load");
         assert_eq!(cfg.rust_log, "debug");
     }
 
     #[test]
     fn port_boundary_max() {
-        let cfg = Config::from_vars(Some("65535"), None).expect("should accept max port");
+        let cfg = Config::from_vars(Some("65535"), None, Some(DB)).expect("should accept max port");
         assert_eq!(cfg.port, 65535);
     }
 
     #[test]
     fn rejects_port_zero() {
-        // u16 parses "0" successfully, but 0 is technically invalid as a
-        // listening port.  Document current behaviour: we accept it and let
-        // the OS reject it at bind time (keeps parsing simple).
-        let cfg = Config::from_vars(Some("0"), None).expect("parses without error");
+        // u16 parses "0" successfully; we accept it and let the OS reject it
+        // at bind time (keeps parsing simple).
+        let cfg = Config::from_vars(Some("0"), None, Some(DB)).expect("parses without error");
         assert_eq!(cfg.port, 0);
+    }
+
+    #[test]
+    fn requires_database_url() {
+        let err = Config::from_vars(None, None, None).expect_err("should fail without DB URL");
+        assert!(
+            err.contains("DATABASE_URL"),
+            "error should mention DATABASE_URL, got: {err}"
+        );
+    }
+
+    #[test]
+    fn database_url_stored_verbatim() {
+        let url = "postgres://user:pass@host:5432/db";
+        let cfg = Config::from_vars(None, None, Some(url)).expect("should load");
+        assert_eq!(cfg.database_url, url);
     }
 }

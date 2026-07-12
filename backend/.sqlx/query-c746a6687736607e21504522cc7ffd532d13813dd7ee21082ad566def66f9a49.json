@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO balances (project_id, token_address, amount, updated_at)\n        VALUES ($1, $2, $3::NUMERIC, now())\n        ON CONFLICT (project_id, token_address)\n        DO UPDATE SET\n            amount     = balances.amount + EXCLUDED.amount,\n            updated_at = now()\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Numeric"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c746a6687736607e21504522cc7ffd532d13813dd7ee21082ad566def66f9a49"
+}

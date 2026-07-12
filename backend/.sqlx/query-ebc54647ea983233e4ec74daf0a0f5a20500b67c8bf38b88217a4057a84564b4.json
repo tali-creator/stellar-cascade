@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE projects\n        SET last_synced_ledger = GREATEST(last_synced_ledger, $2), updated_at = now()\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ebc54647ea983233e4ec74daf0a0f5a20500b67c8bf38b88217a4057a84564b4"
+}

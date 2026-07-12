@@ -97,18 +97,13 @@ async fn run_loop(
 ///
 /// The cursor is advanced **once**, after all events in the batch have been
 /// applied — not per-event.  If the process crashes mid-batch, the cursor
-/// stays at its pre-batch value, and the next run re-fetches from the same
-/// start ledger.  Events already applied in the aborted batch are either:
+/// stays at its pre-batch value, and the next run re-fetches the same batch.
 ///
-/// - Idempotent on re-apply (`ON CONFLICT DO NOTHING` for RegisterProject,
-///   additive upsert for Deposit), or
-/// - Re-applied atomically (UpdateSplits deletes + re-inserts inside a txn).
-///
-/// The one non-idempotent case is Deposit accumulation: a deposit re-applied
-/// after a crash would double-count.  This is acceptable given that the
-/// deposit-phase contract is not yet live; when it is, the `sync_events`
-/// audit log provides the reconciliation trail to detect and correct
-/// double-counts if they ever occur.
+/// Re-applied events are handled by `apply_event`'s idempotency gate: the
+/// unique constraint on `sync_events.event_id` means a re-applied event
+/// produces 0 rows affected and is skipped entirely, with no state write.
+/// This makes all event types safe to replay — including `Deposit`, which
+/// would otherwise double-count on re-application (see B16).
 async fn poll_once(
     pool: &PgPool,
     rpc_url: &str,
@@ -139,7 +134,17 @@ async fn poll_once(
 
         match decode_event(raw) {
             Ok(Some(decoded)) => {
-                match apply_event(pool, rpc_url, contract_id, &decoded, raw.ledger, tx_hash).await {
+                match apply_event(
+                    pool,
+                    rpc_url,
+                    contract_id,
+                    &decoded,
+                    raw.ledger,
+                    tx_hash,
+                    &raw.id,
+                )
+                .await
+                {
                     Ok(()) => {
                         events_applied += 1;
                         if raw.ledger > highest_ledger {

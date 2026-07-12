@@ -56,9 +56,9 @@ impl Config {
         sync_poll_interval_secs: Option<&str>,
     ) -> Result<Self, String> {
         let port = match port {
-            Some(val) => val.parse::<u16>().map_err(|_| {
-                format!("PORT must be a valid port number (1–65535), got {val:?}")
-            })?,
+            Some(val) => val
+                .parse::<u16>()
+                .map_err(|_| format!("PORT must be a valid port number (1–65535), got {val:?}"))?,
             None => 3000,
         };
 
@@ -136,33 +136,32 @@ mod tests {
 
     #[test]
     fn rejects_invalid_port() {
-        let err =
-            Config::from_vars(Some("banana"), None, Some(DB), None, Some(CONTRACT), None)
-                .expect_err("should fail");
-        assert!(err.contains("PORT"), "error should mention PORT, got: {err}");
+        let err = Config::from_vars(Some("banana"), None, Some(DB), None, Some(CONTRACT), None)
+            .expect_err("should fail");
+        assert!(
+            err.contains("PORT"),
+            "error should mention PORT, got: {err}"
+        );
     }
 
     #[test]
     fn respects_rust_log_var() {
-        let cfg =
-            Config::from_vars(None, Some("debug"), Some(DB), None, Some(CONTRACT), None)
-                .expect("should load");
+        let cfg = Config::from_vars(None, Some("debug"), Some(DB), None, Some(CONTRACT), None)
+            .expect("should load");
         assert_eq!(cfg.rust_log, "debug");
     }
 
     #[test]
     fn port_boundary_max() {
-        let cfg =
-            Config::from_vars(Some("65535"), None, Some(DB), None, Some(CONTRACT), None)
-                .expect("should accept max port");
+        let cfg = Config::from_vars(Some("65535"), None, Some(DB), None, Some(CONTRACT), None)
+            .expect("should accept max port");
         assert_eq!(cfg.port, 65535);
     }
 
     #[test]
     fn rejects_port_zero() {
-        let cfg =
-            Config::from_vars(Some("0"), None, Some(DB), None, Some(CONTRACT), None)
-                .expect("parses without error");
+        let cfg = Config::from_vars(Some("0"), None, Some(DB), None, Some(CONTRACT), None)
+            .expect("parses without error");
         assert_eq!(cfg.port, 0);
     }
 
@@ -227,17 +226,15 @@ mod tests {
 
     #[test]
     fn sync_poll_interval_can_be_overridden() {
-        let cfg =
-            Config::from_vars(None, None, Some(DB), None, Some(CONTRACT), Some("30"))
-                .expect("should load");
+        let cfg = Config::from_vars(None, None, Some(DB), None, Some(CONTRACT), Some("30"))
+            .expect("should load");
         assert_eq!(cfg.sync_poll_interval_secs, 30);
     }
 
     #[test]
     fn rejects_invalid_poll_interval() {
-        let err =
-            Config::from_vars(None, None, Some(DB), None, Some(CONTRACT), Some("fast"))
-                .expect_err("should fail");
+        let err = Config::from_vars(None, None, Some(DB), None, Some(CONTRACT), Some("fast"))
+            .expect_err("should fail");
         assert!(
             err.contains("SYNC_POLL_INTERVAL_SECS"),
             "error should mention SYNC_POLL_INTERVAL_SECS, got: {err}"

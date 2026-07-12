@@ -11,8 +11,8 @@
 //! A `last_poll_unix_secs` value of `0` means the worker has never
 //! completed a cycle since startup — treated as stale by the health handler.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// How many seconds without a successful poll cycle before the health

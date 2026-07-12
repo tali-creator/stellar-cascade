@@ -69,8 +69,15 @@ pub async fn apply_event(
             owner_address,
             ..
         } => {
-            apply_register(&mut txn, rpc_url, contract_id, project_id, owner_address, ledger)
-                .await?;
+            apply_register(
+                &mut txn,
+                rpc_url,
+                contract_id,
+                project_id,
+                owner_address,
+                ledger,
+            )
+            .await?;
 
             append_sync_event(
                 &mut txn,
@@ -262,12 +269,9 @@ async fn upsert_splits(
     };
 
     // Delete existing splits for this project (all-or-nothing replacement).
-    sqlx::query!(
-        "DELETE FROM splits WHERE project_id = $1",
-        project_id
-    )
-    .execute(&mut **txn)
-    .await?;
+    sqlx::query!("DELETE FROM splits WHERE project_id = $1", project_id)
+        .execute(&mut **txn)
+        .await?;
 
     // Re-insert the fresh receiver list.
     for (position, receiver) in on_chain.receivers.iter().enumerate() {
@@ -314,10 +318,7 @@ async fn append_sync_event(
     Ok(())
 }
 
-async fn advance_cursor(
-    txn: &mut Transaction<'_, Postgres>,
-    ledger: u32,
-) -> Result<(), SyncError> {
+async fn advance_cursor(txn: &mut Transaction<'_, Postgres>, ledger: u32) -> Result<(), SyncError> {
     // Only advance if the new ledger is strictly greater than the stored one,
     // so a batch processed out of order never moves the cursor backwards.
     sqlx::query!(

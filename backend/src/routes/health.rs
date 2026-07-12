@@ -35,10 +35,10 @@ pub struct SyncStatus {
 /// GET /health
 ///
 /// Returns:
-/// - `200 OK`   with `{"status":"ok",     "sync":{...}}` when sync is healthy.
-/// - `503`      with `{"status":"degraded","sync":{...}}` when no successful
-///              poll has happened within the staleness threshold (60 s), or
-///              when the worker has never completed a cycle since startup.
+/// - `200 OK`  with `{"status":"ok",      "sync":{...}}` when sync is healthy.
+/// - `503`     with `{"status":"degraded","sync":{...}}` when no successful
+///   poll has happened within the staleness threshold (60 s), or when the
+///   worker has never completed a cycle since startup.
 ///
 /// The `sync` object is additive — existing consumers that only check
 /// `status == "ok"` continue to work without changes.
@@ -66,13 +66,7 @@ pub async fn handler(State(sync_state): State<Arc<SyncState>>) -> impl IntoRespo
             }),
         )
     } else {
-        (
-            StatusCode::OK,
-            Json(HealthResponse {
-                status: "ok",
-                sync,
-            }),
-        )
+        (StatusCode::OK, Json(HealthResponse { status: "ok", sync }))
     }
 }
 
@@ -82,8 +76,8 @@ pub async fn handler(State(sync_state): State<Arc<SyncState>>) -> impl IntoRespo
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use axum::body::Body;
@@ -92,7 +86,7 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::router_for_test;
-    use crate::sync_state::{SyncState, STALE_THRESHOLD_SECS};
+    use crate::sync_state::{STALE_THRESHOLD_SECS, SyncState};
 
     fn now_unix_secs() -> u64 {
         SystemTime::now()
@@ -168,12 +162,8 @@ mod tests {
         let state = SyncState::new_shared();
         // Backdate the last poll to beyond the threshold.
         let stale_ts = now_unix_secs() - STALE_THRESHOLD_SECS - 5;
-        state
-            .last_poll_unix_secs
-            .store(stale_ts, Ordering::Relaxed);
-        state
-            .last_processed_ledger
-            .store(999, Ordering::Relaxed);
+        state.last_poll_unix_secs.store(stale_ts, Ordering::Relaxed);
+        state.last_processed_ledger.store(999, Ordering::Relaxed);
 
         let (status, json) = get_health(state).await;
 

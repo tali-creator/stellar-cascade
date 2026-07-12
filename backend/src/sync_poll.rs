@@ -71,9 +71,7 @@ async fn run_loop(
 
                 info!(
                     events_fetched,
-                    events_applied,
-                    cursor,
-                    "poll cycle complete"
+                    events_applied, cursor, "poll cycle complete"
                 );
             }
             Err(e) => {
@@ -121,8 +119,7 @@ async fn poll_once(
 
         match decode_event(raw) {
             Ok(Some(decoded)) => {
-                match apply_event(pool, rpc_url, contract_id, &decoded, raw.ledger, tx_hash).await
-                {
+                match apply_event(pool, rpc_url, contract_id, &decoded, raw.ledger, tx_hash).await {
                     Ok(()) => events_applied += 1,
                     Err(e) => {
                         warn!(
@@ -149,11 +146,10 @@ async fn poll_once(
     }
 
     // Read cursor again after applying to report the final position.
-    let final_cursor =
-        sqlx::query!("SELECT last_processed_ledger FROM sync_cursor WHERE id = 1")
-            .fetch_one(pool)
-            .await?
-            .last_processed_ledger;
+    let final_cursor = sqlx::query!("SELECT last_processed_ledger FROM sync_cursor WHERE id = 1")
+        .fetch_one(pool)
+        .await?
+        .last_processed_ledger;
 
     Ok((events_fetched, events_applied, final_cursor))
 }

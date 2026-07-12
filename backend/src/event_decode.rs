@@ -241,8 +241,8 @@ pub fn decode_event(raw: &RawEvent) -> Result<Option<DecodedEvent>, DecodeError>
             }
 
             let topic2 = decode_scval(&raw.topic[2], "topic[2]")?;
-            let token_address = scval_to_strkey(topic2.clone())
-                .ok_or(DecodeError::BadDepositValue(topic2))?;
+            let token_address =
+                scval_to_strkey(topic2.clone()).ok_or(DecodeError::BadDepositValue(topic2))?;
 
             let value = decode_scval(&raw.value, "value")?;
             let amount = match value {
@@ -419,7 +419,7 @@ mod tests {
 
     #[test]
     fn decodes_deposit_event() {
-        use stellar_xdr::{Int128Parts, ScAddress, Hash};
+        use stellar_xdr::{Hash, Int128Parts, ScAddress};
 
         let token_pubkey = [0xCC_u8; 32];
         // Deposit: topics = [symbol("deposit"), project_id_bytes, token_address], value = i128
@@ -429,9 +429,9 @@ mod tests {
         let lo = amount as u64;
 
         // Use a contract address for the token
-        let token_addr = ScVal::Address(ScAddress::Contract(
-            stellar_xdr::ContractId(Hash(token_pubkey)),
-        ));
+        let token_addr = ScVal::Address(ScAddress::Contract(stellar_xdr::ContractId(Hash(
+            token_pubkey,
+        ))));
 
         let mut raw = make_raw_event(
             vec![symbol_val("deposit"), bytes32_val(0xAA)],
@@ -477,15 +477,15 @@ mod tests {
     #[test]
     fn deposit_i128_roundtrip() {
         // Verify hi/lo reconstruction for a large negative value (stress test sign extension).
-        use stellar_xdr::{Int128Parts, Hash, ScAddress};
+        use stellar_xdr::{Hash, Int128Parts, ScAddress};
 
         let amount: i128 = -42_000_000_000_000_i128;
         let hi = (amount >> 64) as i64;
         let lo = amount as u64;
 
-        let token_addr = ScVal::Address(ScAddress::Contract(
-            stellar_xdr::ContractId(Hash([0xAB; 32])),
-        ));
+        let token_addr = ScVal::Address(ScAddress::Contract(stellar_xdr::ContractId(Hash(
+            [0xAB; 32],
+        ))));
 
         let mut raw = make_raw_event(
             vec![symbol_val("deposit"), bytes32_val(0x01)],
@@ -495,8 +495,14 @@ mod tests {
 
         let decoded = decode_event(&raw).unwrap().unwrap();
         match decoded {
-            DecodedEvent::Deposit { amount: decoded_amount, .. } => {
-                assert_eq!(decoded_amount, amount, "i128 hi/lo reconstruction must be exact");
+            DecodedEvent::Deposit {
+                amount: decoded_amount,
+                ..
+            } => {
+                assert_eq!(
+                    decoded_amount, amount,
+                    "i128 hi/lo reconstruction must be exact"
+                );
             }
             other => panic!("expected Deposit, got {other:?}"),
         }

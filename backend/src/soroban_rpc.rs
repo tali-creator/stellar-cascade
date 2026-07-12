@@ -20,13 +20,13 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum RpcError {
     #[error("failed to create RPC client: {0}")]
-    ClientInit(#[from] stellar_rpc_client::Error),
+    ClientInit(#[from] Box<stellar_rpc_client::Error>),
 
     #[error("getEvents RPC call failed: {0}")]
-    GetEvents(stellar_rpc_client::Error),
+    GetEvents(Box<stellar_rpc_client::Error>),
 
     #[error("getLedgerEntries RPC call failed: {0}")]
-    GetLedgerEntries(stellar_rpc_client::Error),
+    GetLedgerEntries(Box<stellar_rpc_client::Error>),
 
     #[error("XDR encode/decode error: {0}")]
     Xdr(#[from] stellar_xdr::Error),
@@ -76,7 +76,7 @@ pub async fn get_events(
     start_ledger: u32,
     limit: Option<usize>,
 ) -> Result<Vec<RawEvent>, RpcError> {
-    let client = Client::new(rpc_url)?;
+    let client = Client::new(rpc_url).map_err(Box::new)?;
 
     let response = client
         .get_events(
@@ -87,7 +87,7 @@ pub async fn get_events(
             Some(limit.unwrap_or(100)),
         )
         .await
-        .map_err(RpcError::GetEvents)?;
+        .map_err(|e| RpcError::GetEvents(Box::new(e)))?;
 
     Ok(response.events)
 }
@@ -122,15 +122,10 @@ pub async fn fetch_project(
         .map_err(|e| RpcError::InvalidContractId(contract_id.to_string(), e.to_string()))?;
 
     // Build DataKey::Project(id) as ScVal::Vec([Symbol("Project"), Bytes(id)]).
-    let data_key = ScVal::Vec(Some(ScVec(
-        VecM::try_from(vec![
-            ScVal::Symbol(ScSymbol(StringM::try_from("Project").map_err(stellar_xdr::Error::from)?)),
-            ScVal::Bytes(ScBytes(
-                id_bytes.clone().try_into().map_err(stellar_xdr::Error::from)?,
-            )),
-        ])
-        .map_err(stellar_xdr::Error::from)?,
-    )));
+    let data_key = ScVal::Vec(Some(ScVec(VecM::try_from(vec![
+        ScVal::Symbol(ScSymbol(StringM::try_from("Project")?)),
+        ScVal::Bytes(ScBytes(id_bytes.clone().try_into()?)),
+    ])?)));
 
     // Build the LedgerKey.
     let ledger_key = LedgerKey::ContractData(LedgerKeyContractData {
@@ -143,14 +138,14 @@ pub async fn fetch_project(
     let key_xdr = ledger_key.to_xdr(Limits::none())?;
     let key_b64 = base64::engine::general_purpose::STANDARD.encode(&key_xdr);
 
-    let client = Client::new(rpc_url)?;
+    let client = Client::new(rpc_url).map_err(Box::new)?;
     let response = client
         .get_ledger_entries(&[LedgerKey::from_xdr(
             base64::engine::general_purpose::STANDARD.decode(&key_b64)?,
             Limits::none(),
         )?])
         .await
-        .map_err(RpcError::GetLedgerEntries)?;
+        .map_err(|e| RpcError::GetLedgerEntries(Box::new(e)))?;
 
     let entries = match response.entries {
         Some(ref e) if !e.is_empty() => e,
@@ -158,8 +153,7 @@ pub async fn fetch_project(
     };
 
     // Decode the returned XDR value.
-    let entry_xdr = base64::engine::general_purpose::STANDARD
-        .decode(&entries[0].xdr)?;
+    let entry_xdr = base64::engine::general_purpose::STANDARD.decode(&entries[0].xdr)?;
 
     // The value is a LedgerEntry; extract the contract data value (ScVal).
     use stellar_xdr::{LedgerEntry, LedgerEntryData};
@@ -202,8 +196,8 @@ fn decode_project_scval(val: ScVal) -> Result<ProjectOnChain, RpcError> {
 
     // owner field
     let owner_val = get_field(&map, "owner").ok_or(stellar_xdr::Error::Invalid)?;
-    let owner_address = crate::event_decode::scval_to_strkey(owner_val)
-        .ok_or(stellar_xdr::Error::Invalid)?;
+    let owner_address =
+        crate::event_decode::scval_to_strkey(owner_val).ok_or(stellar_xdr::Error::Invalid)?;
 
     // receivers field
     let receivers_val = get_field(&map, "receivers").ok_or(stellar_xdr::Error::Invalid)?;

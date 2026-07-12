@@ -1,6 +1,8 @@
 mod config;
 mod db;
+mod event_decode;
 mod routes;
+mod soroban_rpc;
 
 use std::net::SocketAddr;
 
@@ -54,6 +56,7 @@ async fn main() {
     });
 
     info!("connected to Postgres (pool max_size=5)");
+    info!(soroban_rpc_url = %cfg.soroban_rpc_url, "Soroban RPC configured");
 
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
     let listener = tokio::net::TcpListener::bind(addr)

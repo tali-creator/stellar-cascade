@@ -22,6 +22,9 @@ pub struct Config {
     /// Postgres connection string.  **Required.**
     /// Example: `postgres://cascade:cascade@localhost:5432/cascade`
     pub database_url: String,
+
+    /// Soroban RPC endpoint.  Default: Stellar testnet.
+    pub soroban_rpc_url: String,
 }
 
 impl Config {
@@ -43,6 +46,7 @@ impl Config {
             env::var("PORT").ok().as_deref(),
             env::var("RUST_LOG").ok().as_deref(),
             env::var("DATABASE_URL").ok().as_deref(),
+            env::var("SOROBAN_RPC_URL").ok().as_deref(),
         )
     }
 
@@ -55,6 +59,7 @@ impl Config {
         port: Option<&str>,
         rust_log: Option<&str>,
         database_url: Option<&str>,
+        soroban_rpc_url: Option<&str>,
     ) -> Result<Self, String> {
         let port = match port {
             Some(val) => val
@@ -73,10 +78,15 @@ impl Config {
             })?
             .to_string();
 
+        let soroban_rpc_url = soroban_rpc_url
+            .unwrap_or("https://soroban-testnet.stellar.org:443")
+            .to_string();
+
         Ok(Config {
             port,
             rust_log,
             database_url,
+            soroban_rpc_url,
         })
     }
 }
@@ -93,21 +103,25 @@ mod tests {
 
     #[test]
     fn defaults_when_optional_vars_absent() {
-        let cfg = Config::from_vars(None, None, Some(DB)).expect("should load with defaults");
+        let cfg = Config::from_vars(None, None, Some(DB), None).expect("should load with defaults");
         assert_eq!(cfg.port, 3000);
         assert_eq!(cfg.rust_log, "info");
         assert_eq!(cfg.database_url, DB);
+        assert_eq!(
+            cfg.soroban_rpc_url,
+            "https://soroban-testnet.stellar.org:443"
+        );
     }
 
     #[test]
     fn respects_port_var() {
-        let cfg = Config::from_vars(Some("8080"), None, Some(DB)).expect("should load");
+        let cfg = Config::from_vars(Some("8080"), None, Some(DB), None).expect("should load");
         assert_eq!(cfg.port, 8080);
     }
 
     #[test]
     fn rejects_invalid_port() {
-        let err = Config::from_vars(Some("banana"), None, Some(DB)).expect_err("should fail");
+        let err = Config::from_vars(Some("banana"), None, Some(DB), None).expect_err("should fail");
         assert!(
             err.contains("PORT"),
             "error should mention PORT, got: {err}"
@@ -116,27 +130,27 @@ mod tests {
 
     #[test]
     fn respects_rust_log_var() {
-        let cfg = Config::from_vars(None, Some("debug"), Some(DB)).expect("should load");
+        let cfg = Config::from_vars(None, Some("debug"), Some(DB), None).expect("should load");
         assert_eq!(cfg.rust_log, "debug");
     }
 
     #[test]
     fn port_boundary_max() {
-        let cfg = Config::from_vars(Some("65535"), None, Some(DB)).expect("should accept max port");
+        let cfg =
+            Config::from_vars(Some("65535"), None, Some(DB), None).expect("should accept max port");
         assert_eq!(cfg.port, 65535);
     }
 
     #[test]
     fn rejects_port_zero() {
-        // u16 parses "0" successfully; we accept it and let the OS reject it
-        // at bind time (keeps parsing simple).
-        let cfg = Config::from_vars(Some("0"), None, Some(DB)).expect("parses without error");
+        let cfg = Config::from_vars(Some("0"), None, Some(DB), None).expect("parses without error");
         assert_eq!(cfg.port, 0);
     }
 
     #[test]
     fn requires_database_url() {
-        let err = Config::from_vars(None, None, None).expect_err("should fail without DB URL");
+        let err =
+            Config::from_vars(None, None, None, None).expect_err("should fail without DB URL");
         assert!(
             err.contains("DATABASE_URL"),
             "error should mention DATABASE_URL, got: {err}"
@@ -146,7 +160,28 @@ mod tests {
     #[test]
     fn database_url_stored_verbatim() {
         let url = "postgres://user:pass@host:5432/db";
-        let cfg = Config::from_vars(None, None, Some(url)).expect("should load");
+        let cfg = Config::from_vars(None, None, Some(url), None).expect("should load");
         assert_eq!(cfg.database_url, url);
+    }
+
+    #[test]
+    fn soroban_rpc_url_defaults_to_testnet() {
+        let cfg = Config::from_vars(None, None, Some(DB), None).expect("should load");
+        assert_eq!(
+            cfg.soroban_rpc_url,
+            "https://soroban-testnet.stellar.org:443"
+        );
+    }
+
+    #[test]
+    fn soroban_rpc_url_can_be_overridden() {
+        let cfg = Config::from_vars(
+            None,
+            None,
+            Some(DB),
+            Some("https://rpc.mainnet.stellar.org"),
+        )
+        .expect("should load");
+        assert_eq!(cfg.soroban_rpc_url, "https://rpc.mainnet.stellar.org");
     }
 }

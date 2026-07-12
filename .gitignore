@@ -12,5 +12,6 @@
 # Env
 .env
 .env.local
+CREDENTIALS.md
 stellar-cascade-ARCHITECTURE.mdnode_modules/
 node_modules/

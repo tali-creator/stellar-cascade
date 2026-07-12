@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE sync_cursor\n        SET last_processed_ledger = GREATEST(last_processed_ledger, $1),\n            updated_at = now()\n        WHERE id = 1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b2f187a3401e4600258b6bb457f7ec0af6c2bbadbdd7d5a58b9429b0a16459fb"
+}

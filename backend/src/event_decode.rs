@@ -13,10 +13,15 @@
 //! update_splits:
 //!   topics : [ScSymbol("update"), ScBytes(project_id: BytesN<32>)]
 //!   value  : ScU32(new_receiver_count)
-//! ```
 //!
-//! The `deposit` event variant is a placeholder for the future deposit-phase
-//! contract and is documented here but not yet implemented on-chain.
+//! deposit:
+//!   topics : [ScSymbol("deposit"), ScBytes(project_id: BytesN<32>), ScAddress(token_address)]
+//!   value  : ScI128(amount)
+//!
+//! The `deposit` event shape is defined for the future deposit-phase contract.
+//! The decoder is implemented here so `apply_event` can handle it as soon as
+//! the contract is deployed; until then it will never appear on-chain.
+//! ```
 
 #![allow(dead_code)] // used by the sync worker in a later issue
 
@@ -63,6 +68,9 @@ pub enum DecodeError {
 
     #[error("unexpected ScVal shape for update value: {0:?}")]
     BadUpdateValue(ScVal),
+
+    #[error("unexpected ScVal shape for deposit topic/value: {0:?}")]
+    BadDepositValue(ScVal),
 }
 
 // ---------------------------------------------------------------------------
@@ -95,6 +103,22 @@ pub enum DecodedEvent {
         /// Number of receivers in the new split configuration.
         new_receiver_count: u32,
     },
+
+    /// Emitted by the deposit-phase contract when funds are deposited.
+    ///
+    /// Contract topics:  `[Symbol("deposit"), BytesN<32>(project_id), Address(token_address)]`
+    /// Contract value:   `i128(amount)`
+    ///
+    /// The deposit is additive: the sync worker accumulates amounts into the
+    /// `balances` table rather than overwriting them.
+    Deposit {
+        /// 32-byte project ID as lowercase hex.
+        project_id: String,
+        /// Stellar contract address (C... strkey) of the deposited token.
+        token_address: String,
+        /// Amount in the token's smallest unit (i128, stored as NUMERIC in Postgres).
+        amount: i128,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -119,7 +143,8 @@ fn project_id_from_scval(val: ScVal) -> Result<String, DecodeError> {
 }
 
 /// Convert an `ScVal::Address` to a Stellar strkey string.
-fn address_to_strkey(val: ScVal) -> Option<String> {
+/// Exported for use by `soroban_rpc::decode_project_scval`.
+pub fn scval_to_strkey(val: ScVal) -> Option<String> {
     match val {
         ScVal::Address(addr) => match addr {
             ScAddress::Account(account_id) => {
@@ -175,7 +200,7 @@ pub fn decode_event(raw: &RawEvent) -> Result<Option<DecodedEvent>, DecodeError>
                 other => return Err(DecodeError::BadRegisterValue(other)),
             };
 
-            let owner_address = address_to_strkey(owner_val.clone())
+            let owner_address = scval_to_strkey(owner_val.clone())
                 .ok_or(DecodeError::BadRegisterValue(owner_val))?;
 
             let receiver_count = match count_val {
@@ -201,6 +226,38 @@ pub fn decode_event(raw: &RawEvent) -> Result<Option<DecodedEvent>, DecodeError>
             Ok(Some(DecodedEvent::UpdateSplits {
                 project_id,
                 new_receiver_count,
+            }))
+        }
+
+        "deposit" => {
+            // topics: [Symbol("deposit"), BytesN<32>(project_id), Address(token_address)]
+            // value:  ScI128(amount)
+            //
+            // Requires a third topic for the token address.
+            if raw.topic.len() < 3 {
+                return Err(DecodeError::TooFewTopics {
+                    actual: raw.topic.len(),
+                });
+            }
+
+            let topic2 = decode_scval(&raw.topic[2], "topic[2]")?;
+            let token_address =
+                scval_to_strkey(topic2.clone()).ok_or(DecodeError::BadDepositValue(topic2))?;
+
+            let value = decode_scval(&raw.value, "value")?;
+            let amount = match value {
+                ScVal::I128(parts) => {
+                    // ScVal::I128 is an Int128Parts { hi: i64, lo: u64 }.
+                    // Reconstruct the i128.
+                    ((parts.hi as i128) << 64) | (parts.lo as i128)
+                }
+                other => return Err(DecodeError::BadDepositValue(other)),
+            };
+
+            Ok(Some(DecodedEvent::Deposit {
+                project_id,
+                token_address,
+                amount,
             }))
         }
 
@@ -346,13 +403,108 @@ mod tests {
     #[test]
     fn rejects_unknown_event_type() {
         let raw = make_raw_event(
-            vec![symbol_val("deposit"), bytes32_val(0x01)],
+            vec![symbol_val("frobnicate"), bytes32_val(0x01)],
             ScVal::U32(0),
         );
         let err = decode_event(&raw).unwrap_err();
         assert!(
-            matches!(err, DecodeError::UnknownEventType(ref s) if s == "deposit"),
+            matches!(err, DecodeError::UnknownEventType(ref s) if s == "frobnicate"),
             "unexpected error: {err}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // deposit
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn decodes_deposit_event() {
+        use stellar_xdr::{Hash, Int128Parts, ScAddress};
+
+        let token_pubkey = [0xCC_u8; 32];
+        // Deposit: topics = [symbol("deposit"), project_id_bytes, token_address], value = i128
+        let amount: i128 = 1_000_000; // 1 USDC in micro-units
+        // Encode the i128 as Int128Parts
+        let hi = (amount >> 64) as i64;
+        let lo = amount as u64;
+
+        // Use a contract address for the token
+        let token_addr = ScVal::Address(ScAddress::Contract(stellar_xdr::ContractId(Hash(
+            token_pubkey,
+        ))));
+
+        let mut raw = make_raw_event(
+            vec![symbol_val("deposit"), bytes32_val(0xAA)],
+            ScVal::I128(Int128Parts { hi, lo }),
+        );
+        // Inject the third topic (token address) — make_raw_event only adds 2 topics
+        raw.topic.push(encode_scval(&token_addr));
+
+        let decoded = decode_event(&raw).unwrap().unwrap();
+
+        match decoded {
+            DecodedEvent::Deposit {
+                project_id,
+                token_address,
+                amount: decoded_amount,
+            } => {
+                assert_eq!(project_id, "aa".repeat(32));
+                assert!(
+                    token_address.starts_with('C'),
+                    "token should be a C... strkey, got: {token_address}"
+                );
+                assert_eq!(decoded_amount, amount);
+            }
+            other => panic!("expected Deposit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deposit_rejects_missing_token_topic() {
+        use stellar_xdr::Int128Parts;
+        // Only 2 topics — deposit requires 3
+        let raw = make_raw_event(
+            vec![symbol_val("deposit"), bytes32_val(0x01)],
+            ScVal::I128(Int128Parts { hi: 0, lo: 100 }),
+        );
+        let err = decode_event(&raw).unwrap_err();
+        assert!(
+            matches!(err, DecodeError::TooFewTopics { .. }),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn deposit_i128_roundtrip() {
+        // Verify hi/lo reconstruction for a large negative value (stress test sign extension).
+        use stellar_xdr::{Hash, Int128Parts, ScAddress};
+
+        let amount: i128 = -42_000_000_000_000_i128;
+        let hi = (amount >> 64) as i64;
+        let lo = amount as u64;
+
+        let token_addr = ScVal::Address(ScAddress::Contract(stellar_xdr::ContractId(Hash(
+            [0xAB; 32],
+        ))));
+
+        let mut raw = make_raw_event(
+            vec![symbol_val("deposit"), bytes32_val(0x01)],
+            ScVal::I128(Int128Parts { hi, lo }),
+        );
+        raw.topic.push(encode_scval(&token_addr));
+
+        let decoded = decode_event(&raw).unwrap().unwrap();
+        match decoded {
+            DecodedEvent::Deposit {
+                amount: decoded_amount,
+                ..
+            } => {
+                assert_eq!(
+                    decoded_amount, amount,
+                    "i128 hi/lo reconstruction must be exact"
+                );
+            }
+            other => panic!("expected Deposit, got {other:?}"),
+        }
     }
 }

@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO sync_events (ledger_sequence, tx_hash, event_id, event_type, raw_data, processed_at)\n        VALUES ($1, $2, $3, $4, $5, now())\n        ON CONFLICT (event_id) DO NOTHING\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "09062301b3adb447c0d819839cf3c1597fc39224683dd8b53894ddc428d831a6"
+}

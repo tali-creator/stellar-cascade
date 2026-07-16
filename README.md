@@ -2,6 +2,27 @@
 
 **Automated, streaming funding for the open-source software this ecosystem depends on.**
 
+## Current build stage — July 2026
+
+**Status:** Early development — core contract deployed to testnet, indexer functional, frontend in progress
+
+| Layer | Status | Details |
+|---|---|---|
+| **Contracts** | ✅ Testnet deployed | Registry contract live on testnet (deployed 2026-07-11). Core logic complete: project registration, split configuration, balance tracking. All integration tests passing. |
+| **Backend** | 🚧 Indexer functional, API minimal | Soroban event indexer running and decoding contract events into Postgres. Database schema in place for projects, splits, balances, and sync state. API layer under development (currently only health endpoint). |
+| **Frontend** | 🚧 Landing page complete | Static landing page built with all sections (hero, how it works, funding modes). Dashboard, project pages, and wallet integration not yet implemented. |
+
+**What works right now:**
+- Deploy a project to the registry contract on testnet and configure splits
+- Backend indexes all on-chain events (project registration, split updates, deposits) in real time
+- Landing page explains the concept and links to the repo
+
+**What's next:**
+- Complete backend API (project listing, dependency graph traversal, balance queries)
+- Build frontend dashboard (view your project, see incoming funds, claim balance)
+- Wallet connection and transaction signing flow
+- Public project pages and dependency graph explorer
+
 ## The problem
 
 Every protocol, wallet, and app here is built on a stack of open-source libraries, SDKs, and tools — most of it maintained by a small number of unpaid or underpaid contributors. Funding those maintainers today is manual and occasional: a grant application here, a one-off donation there, decided by a small group of reviewers on their own timeline. There is no default, automated way for a projects success to flow back down to the dependencies that made it possible. When a maintainer burns out or moves on, everything built on top of their work inherits that risk silently.

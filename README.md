@@ -2,6 +2,8 @@
 
 **Automated, streaming funding for the open-source software this ecosystem depends on.**
 
+**Live demo:** [https://stellar-cascade-henna.vercel.app/](https://stellar-cascade-henna.vercel.app/)
+
 ## Current build stage — July 2026
 
 **Status:** Early development — core contract deployed to testnet, indexer functional, frontend in progress
